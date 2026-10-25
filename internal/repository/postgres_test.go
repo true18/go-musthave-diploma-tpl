@@ -2,231 +2,19 @@ package repository
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"os"
 	"testing"
 	"time"
 
-	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/true18/go-musthave-diploma-tpl/internal/migrations"
 	"github.com/true18/go-musthave-diploma-tpl/internal/money"
 )
-
-func TestCreateUser(t *testing.T) {
-	db, mock := newMockDB(t)
-	defer db.Close()
-
-	mock.ExpectQuery(createUserQuery).
-		WithArgs("alice", "hash").
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
-
-	id, err := New(db).CreateUser(context.Background(), "alice", []byte("hash"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if id != 1 {
-		t.Fatalf("id = %d", id)
-	}
-	assertExpectations(t, mock)
-}
-
-func TestCreateUserDuplicate(t *testing.T) {
-	db, mock := newMockDB(t)
-	defer db.Close()
-
-	mock.ExpectQuery(createUserQuery).
-		WithArgs("alice", "hash").
-		WillReturnError(&pgconn.PgError{Code: pgUniqueViolation})
-
-	_, err := New(db).CreateUser(context.Background(), "alice", []byte("hash"))
-	if !errors.Is(err, ErrUserExists) {
-		t.Fatalf("err = %v", err)
-	}
-	assertExpectations(t, mock)
-}
-
-func TestFindUserByLogin(t *testing.T) {
-	db, mock := newMockDB(t)
-	defer db.Close()
-
-	createdAt := time.Now()
-	mock.ExpectQuery(findUserQuery).
-		WithArgs("alice").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "login", "password_hash", "created_at"}).
-			AddRow(1, "alice", "hash", createdAt))
-
-	user, err := New(db).FindUserByLogin(context.Background(), "alice")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if user.ID != 1 || user.Login != "alice" || string(user.PasswordHash) != "hash" {
-		t.Fatalf("unexpected user: %+v", user)
-	}
-	assertExpectations(t, mock)
-}
-
-func TestCreateOrder(t *testing.T) {
-	db, mock := newMockDB(t)
-	defer db.Close()
-
-	mock.ExpectQuery(findOrderOwnerQuery).
-		WithArgs("12345678903").
-		WillReturnError(sql.ErrNoRows)
-	mock.ExpectExec(createOrderQuery).
-		WithArgs("12345678903", int64(1), StatusNew).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-
-	err := New(db).CreateOrder(context.Background(), 1, "12345678903")
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertExpectations(t, mock)
-}
-
-func TestCreateOrderDuplicateSameUser(t *testing.T) {
-	db, mock := newMockDB(t)
-	defer db.Close()
-
-	mock.ExpectQuery(findOrderOwnerQuery).
-		WithArgs("12345678903").
-		WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow(1))
-
-	err := New(db).CreateOrder(context.Background(), 1, "12345678903")
-	if !errors.Is(err, ErrOrderExistsSameUser) {
-		t.Fatalf("err = %v", err)
-	}
-	assertExpectations(t, mock)
-}
-
-func TestCreateOrderDuplicateAnotherUser(t *testing.T) {
-	db, mock := newMockDB(t)
-	defer db.Close()
-
-	mock.ExpectQuery(findOrderOwnerQuery).
-		WithArgs("12345678903").
-		WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow(2))
-
-	err := New(db).CreateOrder(context.Background(), 1, "12345678903")
-	if !errors.Is(err, ErrOrderExistsAnotherUser) {
-		t.Fatalf("err = %v", err)
-	}
-	assertExpectations(t, mock)
-}
-
-func TestListOrders(t *testing.T) {
-	db, mock := newMockDB(t)
-	defer db.Close()
-
-	now := time.Now()
-	mock.ExpectQuery(listOrdersQuery).
-		WithArgs(int64(1)).
-		WillReturnRows(sqlmock.NewRows([]string{"number", "status", "accrual", "uploaded_at"}).
-			AddRow("2", StatusProcessed, "500.00", now).
-			AddRow("1", StatusProcessing, nil, now.Add(-time.Hour)))
-
-	orders, err := New(db).ListUserOrders(context.Background(), 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(orders) != 2 || orders[0].Accrual == nil || *orders[0].Accrual != mustAmount(t, "500") {
-		t.Fatalf("unexpected orders: %+v", orders)
-	}
-	assertExpectations(t, mock)
-}
-
-func TestUpdateOrderStatusAndAccrual(t *testing.T) {
-	db, mock := newMockDB(t)
-	defer db.Close()
-
-	amount := mustAmount(t, "500")
-	mock.ExpectExec(updateOrderQuery).
-		WithArgs("12345678903", StatusProcessed, "500", StatusInvalid, StatusProcessed).
-		WillReturnResult(sqlmock.NewResult(0, 1))
-
-	if err := New(db).UpdateOrder(context.Background(), "12345678903", StatusProcessed, &amount); err != nil {
-		t.Fatal(err)
-	}
-	assertExpectations(t, mock)
-}
-
-func TestBalanceCalculation(t *testing.T) {
-	db, mock := newMockDB(t)
-	defer db.Close()
-
-	mock.ExpectQuery(balanceQuery).
-		WithArgs(int64(1), StatusProcessed).
-		WillReturnRows(sqlmock.NewRows([]string{"accrued", "withdrawn"}).AddRow("600.50", "100.50"))
-
-	balance, err := New(db).Balance(context.Background(), 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if balance.Current != mustAmount(t, "500") || balance.Withdrawn != mustAmount(t, "100.5") {
-		t.Fatalf("unexpected balance: %+v", balance)
-	}
-	assertExpectations(t, mock)
-}
-
-func TestWithdraw(t *testing.T) {
-	db, mock := newMockDB(t)
-	defer db.Close()
-
-	mock.ExpectBegin()
-	mock.ExpectQuery(lockUserQuery).WithArgs(int64(1)).
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
-	mock.ExpectQuery(balanceQuery).WithArgs(int64(1), StatusProcessed).
-		WillReturnRows(sqlmock.NewRows([]string{"accrued", "withdrawn"}).AddRow("1000.00", "0"))
-	mock.ExpectExec(insertWithdrawalQuery).WithArgs(int64(1), "2377225624", "751").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectCommit()
-
-	err := New(db).Withdraw(context.Background(), 1, "2377225624", mustAmount(t, "751"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertExpectations(t, mock)
-}
-
-func TestWithdrawInsufficientFunds(t *testing.T) {
-	db, mock := newMockDB(t)
-	defer db.Close()
-
-	mock.ExpectBegin()
-	mock.ExpectQuery(lockUserQuery).WithArgs(int64(1)).
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(1))
-	mock.ExpectQuery(balanceQuery).WithArgs(int64(1), StatusProcessed).
-		WillReturnRows(sqlmock.NewRows([]string{"accrued", "withdrawn"}).AddRow("10.00", "0"))
-	mock.ExpectRollback()
-
-	err := New(db).Withdraw(context.Background(), 1, "2377225624", mustAmount(t, "751"))
-	if !errors.Is(err, ErrInsufficientFunds) {
-		t.Fatalf("err = %v", err)
-	}
-	assertExpectations(t, mock)
-}
-
-func TestListWithdrawals(t *testing.T) {
-	db, mock := newMockDB(t)
-	defer db.Close()
-
-	now := time.Now()
-	mock.ExpectQuery(listWithdrawalsQuery).
-		WithArgs(int64(1)).
-		WillReturnRows(sqlmock.NewRows([]string{"order_number", "sum", "processed_at"}).
-			AddRow("2377225624", "500.00", now))
-
-	withdrawals, err := New(db).ListWithdrawals(context.Background(), 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(withdrawals) != 1 || withdrawals[0].Sum != mustAmount(t, "500") {
-		t.Fatalf("unexpected withdrawals: %+v", withdrawals)
-	}
-	assertExpectations(t, mock)
-}
 
 func TestPostgresIntegration(t *testing.T) {
 	dsn := os.Getenv("TEST_DATABASE_URI")
@@ -234,21 +22,23 @@ func TestPostgresIntegration(t *testing.T) {
 		t.Skip("TEST_DATABASE_URI is not set")
 	}
 
-	db, err := sql.Open("pgx", dsn)
+	pool, err := pgxpool.New(context.Background(), dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-
-	if err := migrations.Up(db); err != nil {
+	defer pool.Close()
+	if err := pool.Ping(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`TRUNCATE withdrawals, orders, users RESTART IDENTITY`); err != nil {
+	if err := migrations.Up(pool); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(context.Background(), `TRUNCATE withdrawals, orders, users RESTART IDENTITY`); err != nil {
 		t.Fatal(err)
 	}
 
-	repo := New(db)
-	userID, err := repo.CreateUser(context.Background(), "alice", []byte("hash"))
+	repo := New(pool)
+	userID, err := repo.CreateUser(context.Background(), "alice", []byte("$2a$04$abcdefghijklmnopqrstuuabcdefghijklmnopqrstuuabcdefghijkl"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,6 +47,9 @@ func TestPostgresIntegration(t *testing.T) {
 	}
 	if err := repo.CreateOrder(context.Background(), userID, "12345678903"); err != nil {
 		t.Fatal(err)
+	}
+	if err := repo.CreateOrder(context.Background(), userID, "12345678903"); !errors.Is(err, ErrOrderExistsSameUser) {
+		t.Fatalf("same-user duplicate error = %v", err)
 	}
 	amount := mustAmount(t, "500")
 	if err := repo.UpdateOrder(context.Background(), "12345678903", StatusProcessed, &amount); err != nil {
@@ -274,30 +67,171 @@ func TestPostgresIntegration(t *testing.T) {
 	}
 }
 
-func newMockDB(t *testing.T) (*sql.DB, sqlmock.Sqlmock) {
-	t.Helper()
-
-	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return db, mock
-}
-
-func assertExpectations(t *testing.T, mock sqlmock.Sqlmock) {
-	t.Helper()
-
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func mustAmount(t *testing.T, value string) money.Amount {
 	t.Helper()
-
 	amount, err := money.Parse(value)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return amount
 }
+
+func TestRepositoryHelpers(t *testing.T) {
+	amount := mustAmount(t, "12.50")
+	if got := nullableAmount(&amount); got != "12.5" {
+		t.Fatalf("nullableAmount = %v", got)
+	}
+	if nullableAmount(nil) != nil {
+		t.Fatal("nil amount was not preserved")
+	}
+	if got, err := parseNullableAmount(pgtype.Text{String: "12.50", Valid: true}); err != nil || *got != amount {
+		t.Fatalf("parse nullable amount = %v, %v", got, err)
+	}
+	if got, err := parseNullableAmount(pgtype.Text{}); err != nil || got != nil {
+		t.Fatalf("null amount = %v, %v", got, err)
+	}
+	if !isUniqueViolation(&pgconn.PgError{Code: pgUniqueViolation, ConstraintName: "orders_number_key"}, "orders_number_key") {
+		t.Fatal("unique violation was not detected")
+	}
+	if isUniqueViolation(&pgconn.PgError{Code: pgUniqueViolation, ConstraintName: "other"}, "orders_number_key") {
+		t.Fatal("wrong constraint was detected")
+	}
+}
+
+func TestBalanceAndScanHelpers(t *testing.T) {
+	balance, err := (&Postgres{}).balance(context.Background(), fakeRowQuerier{row: fakeRow{values: []any{"600.50", "100.50"}}}, 1)
+	if err != nil || balance.Current != mustAmount(t, "500") {
+		t.Fatalf("balance = %+v, err = %v", balance, err)
+	}
+	row := fakeScanRows{values: []any{"12345678903", StatusProcessed, pgtype.Text{String: "500", Valid: true}, timeNow}}
+	order, err := scanOrderRow(row)
+	if err != nil || order.Number != "12345678903" || order.Accrual == nil {
+		t.Fatalf("order = %+v, err = %v", order, err)
+	}
+}
+
+func TestRepositoryWithPoolDouble(t *testing.T) {
+	now := time.Now()
+	p := &fakePool{
+		rowResults: map[string]fakeRow{
+			createUserQuery: {values: []any{int64(1)}},
+			findUserQuery:   {values: []any{int64(1), "alice", []byte("hash"), now}},
+			balanceQuery:    {values: []any{"600.50", "100.50"}},
+		},
+		queryResults: map[string]*fakePgxRows{
+			listOrdersQuery:      {values: [][]any{{"1", StatusProcessed, pgtype.Text{String: "500", Valid: true}, now}}},
+			listPendingQuery:     {values: [][]any{{"1", int64(1), StatusNew, pgtype.Text{}, now}}},
+			listWithdrawalsQuery: {values: [][]any{{"2377225624", "100", now}}},
+		},
+	}
+	repo := newWithPool(p)
+	if id, err := repo.CreateUser(context.Background(), "alice", []byte("hash")); err != nil || id != 1 {
+		t.Fatalf("CreateUser = %d, %v", id, err)
+	}
+	if user, err := repo.FindUserByLogin(context.Background(), "alice"); err != nil || user.Login != "alice" {
+		t.Fatalf("FindUserByLogin = %+v, %v", user, err)
+	}
+	if err := repo.CreateOrder(context.Background(), 1, "1"); err != nil {
+		t.Fatalf("CreateOrder = %v", err)
+	}
+	if orders, err := repo.ListUserOrders(context.Background(), 1); err != nil || len(orders) != 1 {
+		t.Fatalf("ListUserOrders = %+v, %v", orders, err)
+	}
+	if orders, err := repo.ListPendingOrders(context.Background(), 20); err != nil || len(orders) != 1 {
+		t.Fatalf("ListPendingOrders = %+v, %v", orders, err)
+	}
+	amount := mustAmount(t, "500")
+	if err := repo.UpdateOrder(context.Background(), "1", StatusProcessed, &amount); err != nil {
+		t.Fatalf("UpdateOrder = %v", err)
+	}
+	if balance, err := repo.Balance(context.Background(), 1); err != nil || balance.Current != mustAmount(t, "500") {
+		t.Fatalf("Balance = %+v, %v", balance, err)
+	}
+	if withdrawals, err := repo.ListWithdrawals(context.Background(), 1); err != nil || len(withdrawals) != 1 {
+		t.Fatalf("ListWithdrawals = %+v, %v", withdrawals, err)
+	}
+}
+
+var timeNow = time.Unix(100, 0)
+
+type fakeRowQuerier struct{ row fakeRow }
+
+func (f fakeRowQuerier) QueryRow(context.Context, string, ...any) pgx.Row { return f.row }
+
+type fakeRow struct{ values []any }
+
+func (f fakeRow) Scan(dest ...any) error {
+	for i := range dest {
+		switch value := dest[i].(type) {
+		case *string:
+			*value = f.values[i].(string)
+		case *int64:
+			*value = f.values[i].(int64)
+		case *[]byte:
+			*value = f.values[i].([]byte)
+		case *time.Time:
+			*value = f.values[i].(time.Time)
+		}
+	}
+	return nil
+}
+
+type fakeScanRows struct{ values []any }
+
+func (fakeScanRows) Next() bool { return true }
+func (fakeScanRows) Err() error { return nil }
+func (fakeScanRows) Close()     {}
+func (f fakeScanRows) Scan(dest ...any) error {
+	for i := range dest {
+		switch value := dest[i].(type) {
+		case *string:
+			*value = f.values[i].(string)
+		case *pgtype.Text:
+			*value = f.values[i].(pgtype.Text)
+		case interface{ Scan(any) error }:
+			_ = value
+		}
+	}
+	return nil
+}
+
+type fakePool struct {
+	rowResults   map[string]fakeRow
+	queryResults map[string]*fakePgxRows
+}
+
+func (f *fakePool) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return pgconn.NewCommandTag("INSERT 0 1"), nil
+}
+
+func (f *fakePool) Query(_ context.Context, query string, _ ...any) (pgx.Rows, error) {
+	return f.queryResults[query], nil
+}
+
+func (f *fakePool) QueryRow(_ context.Context, query string, _ ...any) pgx.Row {
+	return f.rowResults[query]
+}
+
+func (f *fakePool) Begin(context.Context) (pgx.Tx, error) {
+	return nil, errors.New("transaction not configured")
+}
+
+type fakePgxRows struct{ values [][]any }
+
+func (f *fakePgxRows) Next() bool {
+	return len(f.values) > 0
+}
+
+func (f *fakePgxRows) Scan(dest ...any) error {
+	row := fakeRow{values: f.values[0]}
+	f.values = f.values[1:]
+	return row.Scan(dest...)
+}
+
+func (f *fakePgxRows) Err() error                                   { return nil }
+func (f *fakePgxRows) Close()                                       {}
+func (f *fakePgxRows) CommandTag() pgconn.CommandTag                { return pgconn.NewCommandTag("SELECT 1") }
+func (f *fakePgxRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
+func (f *fakePgxRows) Values() ([]any, error)                       { return nil, nil }
+func (f *fakePgxRows) RawValues() [][]byte                          { return nil }
+func (f *fakePgxRows) Conn() *pgx.Conn                              { return nil }

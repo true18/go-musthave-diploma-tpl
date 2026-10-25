@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
 	"github.com/true18/go-musthave-diploma-tpl/internal/accrual"
@@ -38,6 +38,9 @@ func run() error {
 	if cfg.DatabaseURI == "" {
 		return errors.New("DATABASE_URI is required")
 	}
+	if cfg.AuthSecret == "" {
+		return errors.New("AUTH_SECRET is required")
+	}
 
 	logger, err := zap.NewProduction()
 	if err != nil {
@@ -45,30 +48,27 @@ func run() error {
 	}
 	defer logger.Sync()
 
-	db, err := sql.Open("pgx", cfg.DatabaseURI)
+	pool, err := pgxpool.New(context.Background(), cfg.DatabaseURI)
 	if err != nil {
-		return fmt.Errorf("open database: %w", err)
+		return fmt.Errorf("open database pool: %w", err)
 	}
-	defer db.Close()
+	defer pool.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	if err := db.PingContext(ctx); err != nil {
+	if err := pool.Ping(ctx); err != nil {
 		cancel()
 		return fmt.Errorf("ping database: %w", err)
 	}
 	cancel()
 
-	if err := migrations.Up(db); err != nil {
+	if err := migrations.Up(pool); err != nil {
 		return err
 	}
 
-	repo := repository.New(db)
+	repo := repository.New(pool)
 	appService := service.New(repo)
 
-	authManager, err := auth.NewRandom()
-	if err != nil {
-		return err
-	}
+	authManager := auth.New([]byte(cfg.AuthSecret))
 
 	appHandler := handler.New(appService, authManager)
 	httpServer := server.New(cfg.RunAddress, appHandler, authManager, logger)

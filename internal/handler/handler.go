@@ -55,8 +55,13 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	userID, err := h.service.Register(r.Context(), req.Login, req.Password)
 	switch {
 	case err == nil:
-		h.auth.SetCookie(w, userID)
+		if err := h.auth.SetToken(w, userID); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
+	case errors.Is(err, service.ErrInvalidLogin):
+		w.WriteHeader(http.StatusBadRequest)
 	case errors.Is(err, service.ErrUserExists):
 		w.WriteHeader(http.StatusConflict)
 	default:
@@ -78,7 +83,10 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	userID, err := h.service.Login(r.Context(), req.Login, req.Password)
 	switch {
 	case err == nil:
-		h.auth.SetCookie(w, userID)
+		if err := h.auth.SetToken(w, userID); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 	case errors.Is(err, service.ErrInvalidCredentials):
 		w.WriteHeader(http.StatusUnauthorized)

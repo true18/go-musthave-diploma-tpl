@@ -21,6 +21,7 @@ var (
 	ErrInsufficientFunds       = repository.ErrInsufficientFunds
 	ErrNotFound                = repository.ErrNotFound
 	ErrInvalidCredentials      = errors.New("invalid credentials")
+	ErrInvalidLogin            = errors.New("invalid login")
 	ErrInvalidOrderFormat      = errors.New("invalid order format")
 	ErrInvalidOrderNumber      = errors.New("invalid order number")
 	ErrInvalidWithdrawalAmount = errors.New("invalid withdrawal amount")
@@ -51,6 +52,9 @@ func New(repo Repository) *Service {
 
 // Register creates a user and returns its id.
 func (s *Service) Register(ctx context.Context, login string, password string) (int64, error) {
+	if login == "" || len(login) > 255 || password == "" {
+		return 0, ErrInvalidLogin
+	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return 0, fmt.Errorf("hash password: %w", err)

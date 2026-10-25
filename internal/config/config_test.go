@@ -15,6 +15,7 @@ func TestParseDefaults(t *testing.T) {
 		RunAddress:           ":8080",
 		DatabaseURI:          "",
 		AccrualSystemAddress: "",
+		AuthSecret:           "",
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Fatalf("config mismatch: got %+v want %+v", cfg, want)
@@ -47,7 +48,7 @@ func TestParseEnv(t *testing.T) {
 	}
 }
 
-func TestParseEnvOverridesFlags(t *testing.T) {
+func TestParseFlagsOverrideEnv(t *testing.T) {
 	cfg, err := Parse([]string{"-a", ":9090", "-d", "postgres://flags", "-r", "http://flags-accrual"}, mapEnv(map[string]string{
 		"RUN_ADDRESS":            ":7070",
 		"DATABASE_URI":           "postgres://env",
@@ -57,8 +58,18 @@ func TestParseEnvOverridesFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if cfg.RunAddress != ":7070" || cfg.DatabaseURI != "postgres://env" || cfg.AccrualSystemAddress != "http://env-accrual" {
-		t.Fatalf("env did not override flags: %+v", cfg)
+	if cfg.RunAddress != ":9090" || cfg.DatabaseURI != "postgres://flags" || cfg.AccrualSystemAddress != "http://flags-accrual" {
+		t.Fatalf("flags did not override env: %+v", cfg)
+	}
+}
+
+func TestExplicitDefaultFlagOverridesEnv(t *testing.T) {
+	cfg, err := Parse([]string{"-a", ":8080"}, mapEnv(map[string]string{"RUN_ADDRESS": ":7070"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RunAddress != ":8080" {
+		t.Fatalf("RunAddress = %q, want explicit default", cfg.RunAddress)
 	}
 }
 

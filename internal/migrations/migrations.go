@@ -2,7 +2,6 @@
 package migrations
 
 import (
-	"database/sql"
 	"embed"
 	"errors"
 	"fmt"
@@ -10,6 +9,8 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 // FS contains embedded migration files.
@@ -17,13 +18,15 @@ import (
 //go:embed files/*.sql
 var FS embed.FS
 
-// Up applies all embedded migrations using an already opened DB.
-func Up(db *sql.DB) error {
+// Up applies all embedded migrations using an already opened pool.
+func Up(pool *pgxpool.Pool) error {
 	sourceDriver, err := iofs.New(FS, "files")
 	if err != nil {
 		return fmt.Errorf("create migration source: %w", err)
 	}
 
+	db := stdlib.OpenDBFromPool(pool)
+	defer db.Close()
 	databaseDriver, err := postgres.WithInstance(db, &postgres.Config{})
 	if err != nil {
 		return fmt.Errorf("create migration database driver: %w", err)

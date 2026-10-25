@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -37,6 +38,9 @@ func TestRegisterSuccess(t *testing.T) {
 	}
 	if findCookie(response) == nil {
 		t.Fatal("auth cookie was not set")
+	}
+	if !strings.HasPrefix(response.Header().Get("Authorization"), "Bearer ") {
+		t.Fatal("JWT authorization header was not set")
 	}
 	user := repo.user(t, "alice")
 	if bytes.Equal(user.PasswordHash, []byte("secret")) {

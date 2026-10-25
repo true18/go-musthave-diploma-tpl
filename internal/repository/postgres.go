@@ -2,12 +2,13 @@ package repository
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/true18/go-musthave-diploma-tpl/internal/money"
 )
@@ -33,19 +34,30 @@ const (
 
 // Postgres is a PostgreSQL-backed repository.
 type Postgres struct {
-	db *sql.DB
+	pool pool
 }
 
-// New creates a PostgreSQL repository using an already opened DB.
-func New(db *sql.DB) *Postgres {
-	return &Postgres{db: db}
+type pool interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+	Begin(context.Context) (pgx.Tx, error)
+}
+
+// New creates a PostgreSQL repository using an already opened pool.
+func New(pool *pgxpool.Pool) *Postgres {
+	return &Postgres{pool: pool}
+}
+
+func newWithPool(pool pool) *Postgres {
+	return &Postgres{pool: pool}
 }
 
 // CreateUser creates a user with a bcrypt password hash.
 func (p *Postgres) CreateUser(ctx context.Context, login string, passwordHash []byte) (int64, error) {
 	var id int64
-	if err := p.db.QueryRowContext(ctx, createUserQuery, login, string(passwordHash)).Scan(&id); err != nil {
-		if isUniqueViolation(err) {
+	if err := p.pool.QueryRow(ctx, createUserQuery, login, string(passwordHash)).Scan(&id); err != nil {
+		if isUniqueViolation(err, "users_login_key") {
 			return 0, ErrUserExists
 		}
 		return 0, fmt.Errorf("create user: %w", err)
@@ -56,34 +68,33 @@ func (p *Postgres) CreateUser(ctx context.Context, login string, passwordHash []
 // FindUserByLogin returns a user by login.
 func (p *Postgres) FindUserByLogin(ctx context.Context, login string) (User, error) {
 	var user User
-	var hash string
-	if err := p.db.QueryRowContext(ctx, findUserQuery, login).Scan(&user.ID, &user.Login, &hash, &user.CreatedAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+	if err := p.pool.QueryRow(ctx, findUserQuery, login).Scan(&user.ID, &user.Login, &user.PasswordHash, &user.CreatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return User{}, ErrNotFound
 		}
 		return User{}, fmt.Errorf("find user by login: %w", err)
 	}
-	user.PasswordHash = []byte(hash)
 	return user, nil
 }
 
 // CreateOrder stores an order for a user.
 func (p *Postgres) CreateOrder(ctx context.Context, userID int64, number string) error {
-	err := p.createOrder(ctx, userID, number)
-	if isUniqueViolation(err) {
-		return p.orderOwnerError(ctx, userID, number)
+	if _, err := p.pool.Exec(ctx, createOrderQuery, number, userID, StatusNew); err != nil {
+		if isUniqueViolation(err, "orders_number_key") {
+			return p.orderOwnerError(ctx, userID, number)
+		}
+		return fmt.Errorf("create order: %w", err)
 	}
-	return err
+	return nil
 }
 
 // ListUserOrders returns user orders from newest to oldest.
 func (p *Postgres) ListUserOrders(ctx context.Context, userID int64) ([]Order, error) {
-	rows, err := p.db.QueryContext(ctx, listOrdersQuery, userID)
+	rows, err := p.pool.Query(ctx, listOrdersQuery, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list user orders: %w", err)
 	}
 	defer rows.Close()
-
 	var orders []Order
 	for rows.Next() {
 		order, err := scanOrderRow(rows)
@@ -101,16 +112,15 @@ func (p *Postgres) ListUserOrders(ctx context.Context, userID int64) ([]Order, e
 
 // ListPendingOrders returns a small batch of orders that need accrual polling.
 func (p *Postgres) ListPendingOrders(ctx context.Context, limit int) ([]Order, error) {
-	rows, err := p.db.QueryContext(ctx, listPendingQuery, StatusNew, StatusProcessing, limit)
+	rows, err := p.pool.Query(ctx, listPendingQuery, StatusNew, StatusProcessing, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list pending orders: %w", err)
 	}
 	defer rows.Close()
-
 	var orders []Order
 	for rows.Next() {
 		var order Order
-		var accrual sql.NullString
+		var accrual pgtype.Text
 		if err := rows.Scan(&order.Number, &order.UserID, &order.Status, &accrual, &order.UploadedAt); err != nil {
 			return nil, fmt.Errorf("scan pending order: %w", err)
 		}
@@ -129,7 +139,7 @@ func (p *Postgres) ListPendingOrders(ctx context.Context, limit int) ([]Order, e
 
 // UpdateOrder updates order status and accrual unless the order is already final.
 func (p *Postgres) UpdateOrder(ctx context.Context, number string, status string, accrual *money.Amount) error {
-	if _, err := p.db.ExecContext(ctx, updateOrderQuery, number, status, nullableAmount(accrual), StatusInvalid, StatusProcessed); err != nil {
+	if _, err := p.pool.Exec(ctx, updateOrderQuery, number, status, nullableAmount(accrual), StatusInvalid, StatusProcessed); err != nil {
 		return fmt.Errorf("update order: %w", err)
 	}
 	return nil
@@ -137,25 +147,24 @@ func (p *Postgres) UpdateOrder(ctx context.Context, number string, status string
 
 // Balance calculates current and withdrawn points for a user.
 func (p *Postgres) Balance(ctx context.Context, userID int64) (Balance, error) {
-	return p.balance(ctx, p.db, userID)
+	return p.balance(ctx, p.pool, userID)
 }
 
 // Withdraw atomically saves a withdrawal if the user has enough points.
 func (p *Postgres) Withdraw(ctx context.Context, userID int64, orderNumber string, amount money.Amount) error {
-	tx, err := p.db.BeginTx(ctx, nil)
+	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin withdraw tx: %w", err)
 	}
-	defer tx.Rollback()
+	defer tx.Rollback(ctx)
 
 	var lockedID int64
-	if err := tx.QueryRowContext(ctx, lockUserQuery, userID).Scan(&lockedID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRow(ctx, lockUserQuery, userID).Scan(&lockedID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
 		return fmt.Errorf("lock user: %w", err)
 	}
-
 	balance, err := p.balance(ctx, tx, userID)
 	if err != nil {
 		return err
@@ -163,11 +172,10 @@ func (p *Postgres) Withdraw(ctx context.Context, userID int64, orderNumber strin
 	if balance.Current < amount {
 		return ErrInsufficientFunds
 	}
-
-	if _, err := tx.ExecContext(ctx, insertWithdrawalQuery, userID, orderNumber, amount.String()); err != nil {
+	if _, err := tx.Exec(ctx, insertWithdrawalQuery, userID, orderNumber, amount.String()); err != nil {
 		return fmt.Errorf("insert withdrawal: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit withdraw tx: %w", err)
 	}
 	return nil
@@ -175,12 +183,11 @@ func (p *Postgres) Withdraw(ctx context.Context, userID int64, orderNumber strin
 
 // ListWithdrawals returns user withdrawals from newest to oldest.
 func (p *Postgres) ListWithdrawals(ctx context.Context, userID int64) ([]Withdrawal, error) {
-	rows, err := p.db.QueryContext(ctx, listWithdrawalsQuery, userID)
+	rows, err := p.pool.Query(ctx, listWithdrawalsQuery, userID)
 	if err != nil {
 		return nil, fmt.Errorf("list withdrawals: %w", err)
 	}
 	defer rows.Close()
-
 	var withdrawals []Withdrawal
 	for rows.Next() {
 		var withdrawal Withdrawal
@@ -201,31 +208,20 @@ func (p *Postgres) ListWithdrawals(ctx context.Context, userID int64) ([]Withdra
 	return withdrawals, nil
 }
 
-type querier interface {
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+type rowQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
-func (p *Postgres) createOrder(ctx context.Context, userID int64, number string) error {
-	var ownerID int64
-	err := p.db.QueryRowContext(ctx, findOrderOwnerQuery, number).Scan(&ownerID)
-	switch {
-	case err == nil && ownerID == userID:
-		return ErrOrderExistsSameUser
-	case err == nil:
-		return ErrOrderExistsAnotherUser
-	case !errors.Is(err, sql.ErrNoRows):
-		return fmt.Errorf("find order owner: %w", err)
-	}
-
-	if _, err := p.db.ExecContext(ctx, createOrderQuery, number, userID, StatusNew); err != nil {
-		return err
-	}
-	return nil
+type rows interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+	Close()
 }
 
 func (p *Postgres) orderOwnerError(ctx context.Context, userID int64, number string) error {
 	var ownerID int64
-	if err := p.db.QueryRowContext(ctx, findOrderOwnerQuery, number).Scan(&ownerID); err != nil {
+	if err := p.pool.QueryRow(ctx, findOrderOwnerQuery, number).Scan(&ownerID); err != nil {
 		return fmt.Errorf("find duplicate order owner: %w", err)
 	}
 	if ownerID == userID {
@@ -234,13 +230,11 @@ func (p *Postgres) orderOwnerError(ctx context.Context, userID int64, number str
 	return ErrOrderExistsAnotherUser
 }
 
-func (p *Postgres) balance(ctx context.Context, q querier, userID int64) (Balance, error) {
-	var accruedRaw string
-	var withdrawnRaw string
-	if err := q.QueryRowContext(ctx, balanceQuery, userID, StatusProcessed).Scan(&accruedRaw, &withdrawnRaw); err != nil {
+func (p *Postgres) balance(ctx context.Context, q rowQuerier, userID int64) (Balance, error) {
+	var accruedRaw, withdrawnRaw string
+	if err := q.QueryRow(ctx, balanceQuery, userID, StatusProcessed).Scan(&accruedRaw, &withdrawnRaw); err != nil {
 		return Balance{}, fmt.Errorf("calculate balance: %w", err)
 	}
-
 	accrued, err := money.Parse(accruedRaw)
 	if err != nil {
 		return Balance{}, fmt.Errorf("parse accrual balance: %w", err)
@@ -252,10 +246,10 @@ func (p *Postgres) balance(ctx context.Context, q querier, userID int64) (Balanc
 	return Balance{Current: accrued - withdrawn, Withdrawn: withdrawn}, nil
 }
 
-func scanOrderRow(rows *sql.Rows) (Order, error) {
+func scanOrderRow(row rows) (Order, error) {
 	var order Order
-	var accrual sql.NullString
-	if err := rows.Scan(&order.Number, &order.Status, &accrual, &order.UploadedAt); err != nil {
+	var accrual pgtype.Text
+	if err := row.Scan(&order.Number, &order.Status, &accrual, &order.UploadedAt); err != nil {
 		return Order{}, fmt.Errorf("scan order: %w", err)
 	}
 	amount, err := parseNullableAmount(accrual)
@@ -266,7 +260,7 @@ func scanOrderRow(rows *sql.Rows) (Order, error) {
 	return order, nil
 }
 
-func parseNullableAmount(value sql.NullString) (*money.Amount, error) {
+func parseNullableAmount(value pgtype.Text) (*money.Amount, error) {
 	if !value.Valid {
 		return nil, nil
 	}
@@ -284,10 +278,7 @@ func nullableAmount(amount *money.Amount) any {
 	return amount.String()
 }
 
-func isUniqueViolation(err error) bool {
-	if err == nil {
-		return false
-	}
+func isUniqueViolation(err error, constraint string) bool {
 	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation
+	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation && pgErr.ConstraintName == constraint
 }

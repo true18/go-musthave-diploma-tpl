@@ -18,6 +18,7 @@ type Config struct {
 	RunAddress           string
 	DatabaseURI          string
 	AccrualSystemAddress string
+	AuthSecret           string
 }
 
 // Load reads configuration from command-line flags and environment variables.
@@ -32,15 +33,6 @@ func Parse(args []string, lookup func(string) (string, bool)) (Config, error) {
 		DatabaseURI:          defaultDatabaseURI,
 		AccrualSystemAddress: defaultAccrualSystemAddress,
 	}
-
-	fs := flag.NewFlagSet("gophermart", flag.ContinueOnError)
-	fs.StringVar(&cfg.RunAddress, "a", cfg.RunAddress, "HTTP server address")
-	fs.StringVar(&cfg.DatabaseURI, "d", cfg.DatabaseURI, "PostgreSQL connection URI")
-	fs.StringVar(&cfg.AccrualSystemAddress, "r", cfg.AccrualSystemAddress, "accrual system address")
-	if err := fs.Parse(args); err != nil {
-		return Config{}, fmt.Errorf("parse flags: %w", err)
-	}
-
 	if value, ok := lookup("RUN_ADDRESS"); ok {
 		cfg.RunAddress = value
 	}
@@ -49,6 +41,18 @@ func Parse(args []string, lookup func(string) (string, bool)) (Config, error) {
 	}
 	if value, ok := lookup("ACCRUAL_SYSTEM_ADDRESS"); ok {
 		cfg.AccrualSystemAddress = value
+	}
+	if value, ok := lookup("AUTH_SECRET"); ok {
+		cfg.AuthSecret = value
+	}
+
+	fs := flag.NewFlagSet("gophermart", flag.ContinueOnError)
+	fs.StringVar(&cfg.RunAddress, "a", cfg.RunAddress, "HTTP server address")
+	fs.StringVar(&cfg.DatabaseURI, "d", cfg.DatabaseURI, "PostgreSQL connection URI")
+	fs.StringVar(&cfg.AccrualSystemAddress, "r", cfg.AccrualSystemAddress, "accrual system address")
+	fs.StringVar(&cfg.AuthSecret, "s", cfg.AuthSecret, "JWT signing secret")
+	if err := fs.Parse(args); err != nil {
+		return Config{}, fmt.Errorf("parse flags: %w", err)
 	}
 
 	return cfg, nil
