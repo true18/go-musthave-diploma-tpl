@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/true18/go-musthave-diploma-tpl/internal/auth"
 )
@@ -119,6 +121,41 @@ func TestLoggingDoesNotBreakResponse(t *testing.T) {
 
 	if response.Code != http.StatusTeapot || response.Body.String() != "ok" {
 		t.Fatalf("response = %d %q", response.Code, response.Body.String())
+	}
+}
+
+func TestLoggingLevelMatchesStatus(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		level  zapcore.Level
+	}{
+		{name: "ok", status: http.StatusOK, level: zapcore.InfoLevel},
+		{name: "created", status: http.StatusCreated, level: zapcore.InfoLevel},
+		{name: "redirect", status: http.StatusFound, level: zapcore.InfoLevel},
+		{name: "bad request", status: http.StatusBadRequest, level: zapcore.DebugLevel},
+		{name: "unauthorized", status: http.StatusUnauthorized, level: zapcore.DebugLevel},
+		{name: "conflict", status: http.StatusConflict, level: zapcore.DebugLevel},
+		{name: "server error", status: http.StatusInternalServerError, level: zapcore.ErrorLevel},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			core, logs := observer.New(zapcore.DebugLevel)
+			logger := zap.New(core)
+			handler := Logging(logger)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.status)
+			}))
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/check", nil))
+			entries := logs.All()
+			if len(entries) != 1 || entries[0].Level != tt.level {
+				t.Fatalf("entries = %+v, want level %s", entries, tt.level)
+			}
+			fields := entries[0].ContextMap()
+			if fields["method"] != http.MethodGet || fields["uri"] != "/check" || fields["status"] != int64(tt.status) {
+				t.Fatalf("fields = %+v", fields)
+			}
+		})
 	}
 }
 

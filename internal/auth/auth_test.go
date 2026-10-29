@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +10,17 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 )
+
+func TestUserIDContextKey(t *testing.T) {
+	ctx := context.WithValue(context.Background(), struct{}{}, int64(99))
+	ctx = WithUserID(ctx, 42)
+	if userID, ok := UserIDFromContext(ctx); !ok || userID != 42 {
+		t.Fatalf("userID = %d, ok = %v", userID, ok)
+	}
+	if userID, ok := UserIDFromContext(context.Background()); ok || userID != 0 {
+		t.Fatalf("missing userID = %d, ok = %v", userID, ok)
+	}
+}
 
 func TestTokenRoundTrip(t *testing.T) {
 	manager := New([]byte("test-secret"))

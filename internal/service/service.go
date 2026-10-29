@@ -13,6 +13,8 @@ import (
 	"github.com/true18/go-musthave-diploma-tpl/internal/repository"
 )
 
+const maxOrderNumberLength = 255
+
 // Domain errors returned by Service.
 var (
 	ErrUserExists              = repository.ErrUserExists
@@ -115,7 +117,7 @@ func (s *Service) ListWithdrawals(ctx context.Context, userID int64) ([]reposito
 }
 
 func allDigits(value string) bool {
-	if value == "" {
+	if value == "" || len(value) > maxOrderNumberLength {
 		return false
 	}
 	for i := 0; i < len(value); i++ {

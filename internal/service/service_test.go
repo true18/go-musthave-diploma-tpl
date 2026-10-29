@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,6 +62,9 @@ func TestUploadOrderValidationAndDuplicates(t *testing.T) {
 	}
 	if err := app.UploadOrder(context.Background(), 2, "12345678903"); !errors.Is(err, service.ErrOrderExistsAnotherUser) {
 		t.Fatalf("another user duplicate err = %v", err)
+	}
+	if err := app.UploadOrder(context.Background(), 1, strings.Repeat("1", 256)); !errors.Is(err, service.ErrInvalidOrderFormat) {
+		t.Fatalf("long order err = %v", err)
 	}
 }
 

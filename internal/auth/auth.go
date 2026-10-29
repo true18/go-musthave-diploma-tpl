@@ -18,7 +18,9 @@ const tokenLifetime = 24 * time.Hour
 // CookieName is the name of the authorization cookie.
 const CookieName = "gophermart_session"
 
-var userIDKey struct{}
+type userIDContextKey struct{}
+
+var userIDKey userIDContextKey
 
 // Manager creates and verifies authorization JWTs.
 type Manager struct {

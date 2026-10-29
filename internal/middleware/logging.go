@@ -14,24 +14,37 @@ func Logging(logger *zap.Logger) func(http.Handler) http.Handler {
 			started := time.Now()
 			recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 			next.ServeHTTP(recorder, r)
-			logger.Info("request",
+			fields := []zap.Field{
 				zap.String("method", r.Method),
 				zap.String("uri", r.URL.RequestURI()),
 				zap.Int("status", recorder.status),
 				zap.Int("size", recorder.size),
 				zap.Duration("duration", time.Since(started)),
-			)
+			}
+			switch {
+			case recorder.status >= http.StatusInternalServerError:
+				logger.Error("request", fields...)
+			case recorder.status >= http.StatusBadRequest:
+				logger.Debug("request", fields...)
+			default:
+				logger.Info("request", fields...)
+			}
 		})
 	}
 }
 
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
-	size   int
+	status      int
+	size        int
+	wroteHeader bool
 }
 
 func (r *statusRecorder) WriteHeader(status int) {
+	if r.wroteHeader {
+		return
+	}
+	r.wroteHeader = true
 	r.status = status
 	r.ResponseWriter.WriteHeader(status)
 }
